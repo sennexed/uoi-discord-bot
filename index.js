@@ -73,7 +73,7 @@ client.on("interactionCreate", async interaction => {
 
       const password = interaction.options.getString("password");
 
-      if (password.split(" ").length !== 6) {
+      if (!/^\d{6}$/.test(password)) {
         return interaction.reply({
           content: "Password must be exactly 6 words.",
           ephemeral: true
