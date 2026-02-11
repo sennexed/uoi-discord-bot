@@ -144,14 +144,14 @@ client.on("interactionCreate", async interaction => {
       }
 
       const dmEmbed = new EmbedBuilder()
-        .setTitle("UOI Identification Card")
-        .addFields(
-          { name: "ID", value: card.user_id },
-          { name: "Name", value: card.full_name },
-          { name: "Nationality", value: card.nationality },
-          { name: "Role", value: card.role }
-        )
-        .setColor("Blue");
+  .setTitle("UOI Identification Card")
+  .addFields(
+    { name: "ID", value: String(card.user_id || "N/A") },
+    { name: "Name", value: String(card.full_name || "N/A") },
+    { name: "Nationality", value: String(card.nationality || "N/A") },
+    { name: "Role", value: String(card.role || "Citizen") }
+  )
+  .setColor(0x3498db);
 
       await member.send({ embeds: [dmEmbed] });
 
