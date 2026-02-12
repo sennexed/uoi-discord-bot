@@ -36,15 +36,14 @@ const BACKEND_URL = process.env.BACKEND_URL;
 const INDIAN_ROLE_ID = process.env.INDIAN_ROLE_ID;
 const FOREIGN_ROLE_ID = process.env.FOREIGN_ROLE_ID;
 
-let requestChannelId = null;
-
 const commands = [
     new SlashCommandBuilder().setName('register').setDescription('Start your verification process'),
     new SlashCommandBuilder().setName('status').setDescription('Check your current verification status'),
     new SlashCommandBuilder().setName('card').setDescription('Get your digital ID card'),
-    new SlashCommandBuilder().setName('requests')
-        .setDescription('Set the verification requests channel (Admin only)')
-        .addChannelOption(option => option.setName('channel').setDescription('Target channel').setRequired(true))
+    new SlashCommandBuilder().setName('setup')
+        .setDescription('Configure registration and approval channels (Admin only)')
+        .addChannelOption(option => option.setName('registration_channel').setDescription('Channel where users can register').setRequired(true))
+        .addChannelOption(option => option.setName('approval_channel').setDescription('Channel where requests are sent').setRequired(true))
         .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator),
     new SlashCommandBuilder().setName('approve')
         .setDescription('Manually approve a user (Admin only)')
@@ -75,36 +74,76 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isChatInputCommand()) {
         const { commandName } = interaction;
 
-        if (commandName === 'register') {
-            const modal = new ModalBuilder().setCustomId('register_modal').setTitle('User Verification');
+        if (commandName === 'setup') {
+            const regChan = interaction.options.getChannel('registration_channel');
+            const appChan = interaction.options.getChannel('approval_channel');
             
-            const nameInput = new TextInputBuilder()
-                .setCustomId('full_name')
-                .setLabel("Full Name")
-                .setStyle(TextInputStyle.Short)
-                .setRequired(true);
+            try {
+                const res = await fetch(`${BACKEND_URL}/config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        guild_id: interaction.guild.id,
+                        registration_channel_id: regChan.id,
+                        approval_channel_id: appChan.id
+                    })
+                });
 
-            const nationalityInput = new TextInputBuilder()
-                .setCustomId('nationality')
-                .setLabel("Nationality (Indian or NRI)")
-                .setStyle(TextInputStyle.Short)
-                .setRequired(true);
+                if (res.ok) {
+                    interaction.reply({ content: "Registration system configured successfully.", ephemeral: true });
+                } else {
+                    interaction.reply({ content: "Failed to save configuration to backend.", ephemeral: true });
+                }
+            } catch (err) {
+                interaction.reply({ content: "Error connecting to backend for setup.", ephemeral: true });
+            }
+        }
 
-            const passwordInput = new TextInputBuilder()
-                .setCustomId('password')
-                .setLabel("Password (exactly 6 characters)")
-                .setStyle(TextInputStyle.Short)
-                .setMinLength(6)
-                .setMaxLength(6)
-                .setRequired(true);
+        if (commandName === 'register') {
+            // Check config
+            try {
+                const res = await fetch(`${BACKEND_URL}/config/${interaction.guild.id}`);
+                if (!res.ok) {
+                    return interaction.reply({ content: "Registration system not set up. Contact admin.", ephemeral: true });
+                }
+                const config = await res.json();
+                
+                if (interaction.channelId !== config.registration_channel_id) {
+                    return interaction.reply({ content: `Please use the registration channel: <#${config.registration_channel_id}>`, ephemeral: true });
+                }
 
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(nameInput),
-                new ActionRowBuilder().addComponents(nationalityInput),
-                new ActionRowBuilder().addComponents(passwordInput)
-            );
+                const modal = new ModalBuilder().setCustomId('register_modal').setTitle('User Verification');
+                
+                const nameInput = new TextInputBuilder()
+                    .setCustomId('full_name')
+                    .setLabel("Full Name")
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
 
-            await interaction.showModal(modal);
+                const nationalityInput = new TextInputBuilder()
+                    .setCustomId('nationality')
+                    .setLabel("Nationality (Indian or NRI)")
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true);
+
+                const passwordInput = new TextInputBuilder()
+                    .setCustomId('password')
+                    .setLabel("Password (exactly 6 characters)")
+                    .setStyle(TextInputStyle.Short)
+                    .setMinLength(6)
+                    .setMaxLength(6)
+                    .setRequired(true);
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(nameInput),
+                    new ActionRowBuilder().addComponents(nationalityInput),
+                    new ActionRowBuilder().addComponents(passwordInput)
+                );
+
+                await interaction.showModal(modal);
+            } catch (err) {
+                interaction.reply({ content: "Critical error fetching guild configuration.", ephemeral: true });
+            }
         }
 
         if (commandName === 'status') {
@@ -137,11 +176,6 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        if (commandName === 'requests') {
-            requestChannelId = interaction.options.getChannel('channel').id;
-            interaction.reply({ content: `Requests channel set to <#${requestChannelId}>`, ephemeral: true });
-        }
-
         if (['approve', 'reject', 'revoke'].includes(commandName)) {
             const targetUser = interaction.options.getUser('user');
             const newStatus = commandName === 'approve' ? 'active' : (commandName === 'reject' ? 'rejected' : 'revoked');
@@ -154,11 +188,10 @@ client.on('interactionCreate', async interaction => {
             const full_name = interaction.fields.getTextInputValue('full_name');
             const nationalityInput = interaction.fields.getTextInputValue('nationality').trim().toLowerCase();
             const password = interaction.fields.getTextInputValue('password');
-
             const nationality = nationalityInput.includes('nri') ? 'NRI' : 'Indian';
 
             try {
-                const res = await fetch(`${BACKEND_URL}/register`, {
+                const regRes = await fetch(`${BACKEND_URL}/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -169,11 +202,14 @@ client.on('interactionCreate', async interaction => {
                     })
                 });
 
-                if (res.ok) {
+                if (regRes.ok) {
                     await interaction.reply({ content: "Registration submitted successfully! Please wait for admin approval.", ephemeral: true });
                     
-                    if (requestChannelId) {
-                        const channel = await client.channels.fetch(requestChannelId);
+                    // Fetch config for approval channel
+                    const configRes = await fetch(`${BACKEND_URL}/config/${interaction.guild.id}`);
+                    if (configRes.ok) {
+                        const config = await configRes.json();
+                        const channel = await client.channels.fetch(config.approval_channel_id);
                         if (channel) {
                             const embed = new EmbedBuilder()
                                 .setTitle("New Verification Request")
@@ -194,7 +230,7 @@ client.on('interactionCreate', async interaction => {
                         }
                     }
                 } else {
-                    const err = await res.json();
+                    const err = await regRes.json();
                     await interaction.reply({ content: `Registration failed: ${err.error}`, ephemeral: true });
                 }
             } catch (err) {
@@ -231,7 +267,6 @@ async function handleVerificationUpdate(interaction, userId, status) {
                 const roleId = data.nationality === 'Indian' ? INDIAN_ROLE_ID : FOREIGN_ROLE_ID;
                 if (roleId) await member.roles.add(roleId).catch(console.error);
 
-                // Send DM with Card
                 try {
                     const cardRes = await fetch(`${BACKEND_URL}/generate_card/${userId}?avatar_url=${encodeURIComponent(member.user.displayAvatarURL({ extension: 'png' }))}`);
                     if (cardRes.ok) {
@@ -253,12 +288,13 @@ async function handleVerificationUpdate(interaction, userId, status) {
             await interaction.reply({ content: `Update failed: ${err.error}`, ephemeral: true });
         }
     } catch (err) {
-        if (interaction.deferred || interaction.replied) {
-            await interaction.followUp({ content: "Communication error with backend.", ephemeral: true });
-        } else {
+        if (!interaction.replied && !interaction.deferred) {
             await interaction.reply({ content: "Communication error with backend.", ephemeral: true });
+        } else {
+            await interaction.followUp({ content: "Communication error with backend.", ephemeral: true });
         }
     }
 }
 
 client.login(TOKEN);
+            
