@@ -8,7 +8,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  AttachmentBuilder
+  PermissionFlagsBits
 } from "discord.js";
 
 import fetch from "node-fetch";
@@ -28,20 +28,16 @@ const REQUEST_CHANNEL_ID = process.env.REQUEST_CHANNEL_ID;
 const INDIAN_ROLE = "1468475916656181338";
 const FOREIGN_ROLE = "1467589863690862834";
 
-process.on("unhandledRejection", err => {
-  console.error("Unhandled Promise Rejection:", err);
-});
 
-process.on("uncaughtException", err => {
-  console.error("Uncaught Exception:", err);
-});
+// ===================== SLASH COMMANDS =====================
 
 const commands = [
+
   new SlashCommandBuilder()
     .setName("register")
     .setDescription("Register for UOI ID")
     .addStringOption(o =>
-      o.setName("fullname").setDescription("Full name").setRequired(true))
+      o.setName("fullname").setDescription("Your full name").setRequired(true))
     .addStringOption(o =>
       o.setName("nationality")
         .setDescription("Indian or NRI")
@@ -52,26 +48,59 @@ const commands = [
         ))
     .addStringOption(o =>
       o.setName("password")
-        .setDescription("6 digit password")
-        .setRequired(true))
+        .setDescription("6 digit numeric password")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("card")
+    .setDescription("View your UOI ID card"),
+
+  new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("Check your ID status"),
+
+  new SlashCommandBuilder()
+    .setName("setup")
+    .setDescription("Send registration panel")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("revoke")
+    .setDescription("Revoke a user's ID card")
+    .addUserOption(o =>
+      o.setName("user").setDescription("User to revoke").setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+
 ].map(c => c.toJSON());
+
+
+// ===================== REGISTER COMMANDS =====================
 
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+
   await rest.put(
     Routes.applicationGuildCommands(APPLICATION_ID, GUILD_ID),
     { body: commands }
   );
+
+  console.log("Slash commands synced.");
 }
 
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log("UOI Bot Online");
   await registerCommands();
 });
 
+
+// ===================== INTERACTIONS =====================
+
 client.on("interactionCreate", async interaction => {
 
   try {
+
+    // ---------------- REGISTER ----------------
 
     if (interaction.isChatInputCommand()) {
 
@@ -86,9 +115,7 @@ client.on("interactionCreate", async interaction => {
           });
         }
 
-        await interaction.deferReply({ ephemeral: true });
-
-        const res = await fetch(`${BACKEND_URL}/register`, {
+        await fetch(`${BACKEND_URL}/register`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -99,16 +126,10 @@ client.on("interactionCreate", async interaction => {
           })
         });
 
-        const data = await res.json();
-
-        if (!res.ok) {
-          return interaction.editReply(data.error || "Registration failed.");
-        }
-
         const requestChannel = await client.channels.fetch(REQUEST_CHANNEL_ID);
 
         const embed = new EmbedBuilder()
-          .setTitle("New ID Request")
+          .setTitle("New UOI ID Request")
           .setDescription(`User: <@${interaction.user.id}>`)
           .setColor("Blue");
 
@@ -125,64 +146,130 @@ client.on("interactionCreate", async interaction => {
 
         await requestChannel.send({ embeds: [embed], components: [row] });
 
-        await interaction.editReply("Request submitted.");
+        return interaction.reply({
+          content: "Request submitted. Wait for admin approval.",
+          ephemeral: true
+        });
+      }
+
+
+      // ---------------- CARD ----------------
+
+      if (interaction.commandName === "card") {
+
+        const avatar = interaction.user.displayAvatarURL({ extension: "png" });
+
+        const response = await fetch(
+          `${BACKEND_URL}/card/${interaction.user.id}?avatar=${encodeURIComponent(avatar)}`
+        );
+
+        if (!response.ok) {
+          return interaction.reply({
+            content: "Card not available. Maybe still under review.",
+            ephemeral: true
+          });
+        }
+
+        const buffer = await response.arrayBuffer();
+
+        return interaction.reply({
+          files: [{
+            attachment: Buffer.from(buffer),
+            name: "uoi-card.png"
+          }]
+        });
+      }
+
+
+      // ---------------- STATUS ----------------
+
+      if (interaction.commandName === "status") {
+
+        const res = await fetch(`${BACKEND_URL}/status/${interaction.user.id}`);
+        const data = await res.json();
+
+        return interaction.reply({
+          content: `Your status: **${data.status}**`,
+          ephemeral: true
+        });
+      }
+
+
+      // ---------------- SETUP ----------------
+
+      if (interaction.commandName === "setup") {
+
+        const embed = new EmbedBuilder()
+          .setTitle("UOI Registration")
+          .setDescription("Use `/register` to apply for your UOI ID.")
+          .setColor("Blue");
+
+        return interaction.reply({ embeds: [embed] });
+      }
+
+
+      // ---------------- REVOKE ----------------
+
+      if (interaction.commandName === "revoke") {
+
+        const user = interaction.options.getUser("user");
+
+        await fetch(`${BACKEND_URL}/revoke/${user.id}`, {
+          method: "POST"
+        });
+
+        return interaction.reply({
+          content: `Revoked ID for ${user.username}`,
+          ephemeral: true
+        });
       }
     }
 
+
+    // ===================== BUTTONS =====================
+
     if (interaction.isButton()) {
 
-      await interaction.deferUpdate();
+      if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({ content: "Admins only.", ephemeral: true });
+      }
 
       const [action, discordId] = interaction.customId.split("_");
 
-      if (!interaction.member.permissions.has("Administrator")) {
-        return;
-      }
-
       if (action === "approve") {
 
-        await fetch(`${BACKEND_URL}/approve/${discordId}`, { method: "POST" });
+        await fetch(`${BACKEND_URL}/approve/${discordId}`, {
+          method: "POST"
+        });
 
         const member = await interaction.guild.members.fetch(discordId);
 
-        const avatar = member.displayAvatarURL({ extension: "png" });
-
-        const cardRes = await fetch(`${BACKEND_URL}/card/${discordId}?avatar=${encodeURIComponent(avatar)}`);
-
-        if (!cardRes.ok) {
-          await interaction.editReply({ content: "Card generation failed.", components: [] });
-          return;
-        }
-
+        const cardRes = await fetch(`${BACKEND_URL}/card/${discordId}`);
         const buffer = await cardRes.arrayBuffer();
 
-        const attachment = new AttachmentBuilder(Buffer.from(buffer), {
-          name: "uoi_card.png"
+        await member.send({
+          files: [{
+            attachment: Buffer.from(buffer),
+            name: "uoi-card.png"
+          }]
         });
 
-        if (member.roles) {
-          await member.roles.add(INDIAN_ROLE);
-        }
-
-        try {
-          await member.send({ files: [attachment] });
-        } catch {
-          console.log("User has DMs closed.");
-        }
-
-        await interaction.editReply({ content: "Approved ✅", components: [] });
+        await interaction.update({ content: "Approved", components: [] });
       }
 
       if (action === "reject") {
-        await interaction.editReply({ content: "Rejected ❌", components: [] });
+        await interaction.update({ content: "Rejected", components: [] });
       }
     }
 
   } catch (err) {
-    console.error("Interaction Error:", err);
+    console.error(err);
 
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: "An error occurred.", ephemeral: true });
+    if (!interaction.replied) {
+      await interaction.reply({
+        content: "Something went wrong.",
+        ephemeral: true
+      });
     }
   }
 });
